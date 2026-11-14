@@ -83,6 +83,8 @@ impl App {
         if let Some(v) = &mut self.view {
             v.fit(s.max_reach, [0.0, 0.0, (s.z_min.max(0.0) + s.z_max) * 0.4]);
         }
+        // Rebuild the cloud now that the point size matches this arm.
+        self.restats();
         self.update_near();
     }
 
@@ -564,8 +566,8 @@ pub fn start() {
     let canvas: HtmlCanvasElement = doc.get_element_by_id("gl").expect("gl").unchecked_into();
     let view = View::new(canvas.clone(), dark);
     if view.is_none() {
-        if let Some(e) = doc.get_element_by_id("nogl") {
-            e.set_attribute("style", "display:block").ok();
+        if let Some(e) = doc.get_element_by_id("stage") {
+            e.class_list().add_1("nogl").ok();
         }
     }
     let arm = presets::all().swap_remove(0).arm;
