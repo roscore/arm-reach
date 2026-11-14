@@ -1,6 +1,7 @@
 //! Small reusable WebGL2 renderer (no app-specific code): procedural meshes with normals,
 //! hemisphere + directional Blinn-Phong lighting, checker/grid ground with fog, sky gradient,
 //! planar projected shadows (stencil, no double blending), translucent volumes and line edges.
+//! Optional per-vertex colours (multiplied with the paint colour) for batched point clouds.
 use crate::math::{self, M4, V};
 use web_sys::{HtmlCanvasElement, WebGl2RenderingContext as GL, WebGlBuffer, WebGlProgram, WebGlVertexArrayObject};
 use wasm_bindgen::JsCast;
@@ -8,9 +9,11 @@ use wasm_bindgen::JsCast;
 const LIT_VS: &str = r#"#version 300 es
 layout(location=0) in vec3 a_pos;
 layout(location=1) in vec3 a_nrm;
+layout(location=2) in vec3 a_col;
 uniform mat4 u_vp, u_model, u_post;
-out vec3 v_pos, v_nrm;
+out vec3 v_pos, v_nrm, v_col;
 void main() {
+  v_col = a_col;
   vec4 w = u_model * vec4(a_pos, 1.0);
   v_nrm = transpose(inverse(mat3(u_model))) * a_nrm;
   w = u_post * w;
@@ -20,14 +23,14 @@ void main() {
 
 const LIT_FS: &str = r#"#version 300 es
 precision highp float;
-in vec3 v_pos, v_nrm;
+in vec3 v_pos, v_nrm, v_col;
 uniform vec4 u_color;
 uniform vec3 u_eye, u_light, u_sky, u_gnd;
 uniform float u_lit, u_glow, u_clip;
 out vec4 o;
 void main() {
   if (v_pos.y < u_clip) discard;
-  vec3 c = u_color.rgb;
+  vec3 c = u_color.rgb * v_col;
   if (u_lit > 0.5) {
     vec3 n = normalize(v_nrm);
     vec3 v = normalize(u_eye - v_pos);
@@ -112,6 +115,8 @@ pub const LIGHT: Theme = Theme {
 pub struct Geo {
     pub pos: Vec<f32>,
     pub nrm: Vec<f32>,
+    /// Optional per-vertex RGB (empty = white).
+    pub col: Vec<f32>,
     pub idx: Vec<u16>,
     pub lines: bool,
 }
@@ -226,6 +231,29 @@ pub fn frustum(apex: V, corners: &[V; 4]) -> Geo {
         g.tri(apex, corners[i], corners[(i + 1) % 4]);
     }
     g.quad(corners[0], corners[3], corners[2], corners[1]);
+    g
+}
+
+/// Batch of small octahedra (one per point, half-size `r`, colour per point) as a single
+/// non-indexed mesh, so clouds beyond the u16 index range draw in one call. Points stay in order:
+/// `draw_first(.., 24 * k)` shows only the first k.
+pub fn points(pts: &[V], cols: &[V], r: f32) -> Geo {
+    let mut g = Geo::default();
+    let ax = [[r, 0., 0.], [0., r, 0.], [0., 0., r]];
+    for (p, c) in pts.iter().zip(cols) {
+        for oct in 0..8 {
+            let s = |k: usize| if oct >> k & 1 == 0 { 1.0 } else { -1.0 };
+            let v = [0, 1, 2].map(|k| math::add(*p, math::scale(ax[k], s(k))));
+            // Keep counter-clockwise winding as seen from outside.
+            let (b, c2) = if s(0) * s(1) * s(2) > 0.0 { (v[1], v[2]) } else { (v[2], v[1]) };
+            let n = math::norm([s(0), s(1), s(2)]);
+            for q in [v[0], b, c2] {
+                g.pos.extend(q);
+                g.nrm.extend(n);
+                g.col.extend(c);
+            }
+        }
+    }
     g
 }
 
@@ -441,10 +469,11 @@ fn upload(gl: &GL, g: &Geo) -> Option<Mesh> {
     let vao = gl.create_vertex_array()?;
     gl.bind_vertex_array(Some(&vao));
     let mut bufs = vec![];
-    for (loc, data) in [(0, &g.pos), (1, &g.nrm)] {
+    for (loc, data) in [(0, &g.pos), (1, &g.nrm), (2, &g.col)] {
         if data.is_empty() {
             gl.disable_vertex_attrib_array(loc);
-            gl.vertex_attrib3f(loc, 0.0, 1.0, 0.0);
+            let d = if loc == 2 { [1.0; 3] } else { [0.0, 1.0, 0.0] };
+            gl.vertex_attrib3f(loc, d[0], d[1], d[2]);
             continue;
         }
         let b = gl.create_buffer()?;
@@ -480,4 +509,28 @@ fn program(gl: &GL, vs: &str, fs: &str) -> Option<WebGlProgram> {
     }
     gl.link_program(&p);
     gl.get_program_parameter(&p, GL::LINK_STATUS).as_bool().unwrap_or(false).then_some(p)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn points_batch_is_flat_and_closed() {
+        let g = points(&[[0.0; 3], [1.0, 2.0, 3.0]], &[[1.0, 0.0, 0.0], [0.0, 0.5, 1.0]], 0.1);
+        assert!(g.idx.is_empty() && !g.lines);
+        assert_eq!(g.pos.len(), 2 * 24 * 3);
+        assert_eq!(g.nrm.len(), g.pos.len());
+        assert_eq!(g.col.len(), g.pos.len());
+        assert_eq!(&g.col[24 * 3..24 * 3 + 3], &[0.0, 0.5, 1.0]);
+        // Every face points away from its octahedron's centre, with winding matching the normal.
+        for t in 0..16 {
+            let v = |k: usize| -> V { std::array::from_fn(|i| g.pos[(t * 3 + k) * 3 + i]) };
+            let c = if t < 8 { [0.0; 3] } else { [1.0, 2.0, 3.0] };
+            let n: V = std::array::from_fn(|i| g.nrm[t * 9 + i]);
+            let wind = math::cross(math::sub(v(1), v(0)), math::sub(v(2), v(0)));
+            assert!(math::dot(n, math::sub(v(0), c)) > 0.0);
+            assert!(math::dot(wind, n) > 0.0, "triangle {t}");
+        }
+    }
 }
