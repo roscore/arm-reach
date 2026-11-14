@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'self'">
+<meta name="color-scheme" content="light dark">
+<title>arm-reach</title>
+<link data-trunk rel="rust" href="crates/ar_web/Cargo.toml" data-wasm-opt="z">
+<link data-trunk rel="copy-file" href="web/boot.js">
+<style>
+:root { --bg:#f4f5f7; --panel:#fff; --fg:#1b1e24; --mut:#5d6573; --line:#d5d9e0; --acc:#2563eb; --bad:#d93025; --ok:#1e8e3e; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#111419; --panel:#1a1e25; --fg:#e6e8ec; --mut:#9aa3b2; --line:#2e3440; --acc:#60a5fa; --bad:#f87171; --ok:#4ade80; }
+}
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.4 system-ui, sans-serif; }
+header { display:flex; align-items:center; gap:12px; padding:8px 16px; border-bottom:1px solid var(--line); background:var(--panel); }
+header h1 { font-size:17px; margin:0; }
+header p { margin:0; color:var(--mut); flex:1; font-size:13px; }
+main { display:grid; grid-template-columns:minmax(320px, 470px) minmax(0, 1fr); gap:12px; padding:12px 16px; }
+section { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-bottom:12px; }
+h2 { font-size:14px; margin:0 0 8px; }
+main > div { min-width:0; }
+label { display:inline-flex; flex-wrap:wrap; align-items:center; gap:4px; margin:0 10px 6px 0; color:var(--mut); }
+select { max-width:100%; }
+label { max-width:100%; }
+input, select, button { font:inherit; color:var(--fg); background:var(--bg); border:1px solid var(--line); border-radius:5px; padding:3px 6px; }
+button { cursor:pointer; }
+button.on { background:var(--acc); color:#fff; border-color:var(--acc); }
+input[type=number] { width:70px; }
+input[type=range] { flex:1; min-width:80px; padding:0; }
+.scroll { overflow-x:auto; }
+table { border-collapse:collapse; width:100%; }
+th, td { padding:2px 3px; text-align:center; }
+th { color:var(--mut); font-weight:500; font-size:12px; }
+td input[type=number] { width:62px; padding:2px 3px; font-size:12px; }
+.qrow { display:flex; align-items:center; gap:8px; margin:3px 0; }
+.qrow button { width:38px; }
+.qrow span { width:64px; text-align:right; font-variant-numeric:tabular-nums; }
+.kv { display:grid; grid-template-columns:auto 1fr; gap:2px 12px; font-variant-numeric:tabular-nums; }
+.kv b { font-weight:500; color:var(--mut); }
+#stage { position:relative; height:min(62vh, 620px); border-radius:8px; overflow:hidden; background:#000; touch-action:none; }
+#gl { width:100%; height:100%; display:block; touch-action:none; }
+#nogl { display:none; position:absolute; inset:0; padding:24px; color:#eee; background:#222; }
+.bar { position:absolute; display:flex; flex-wrap:wrap; gap:4px; }
+.bar button { background:rgba(20,24,30,.7); color:#eee; border-color:rgba(255,255,255,.25); font-size:12px; }
+.bar button.on { background:var(--acc); }
+#toggles { top:8px; left:8px; } #views { top:8px; right:8px; } #anim { bottom:8px; right:8px; }
+#hud { position:absolute; left:8px; bottom:8px; background:rgba(10,12,16,.7); color:#eee; padding:6px 8px; border-radius:6px; font:12px/1.35 ui-monospace, monospace; white-space:pre; pointer-events:none; }
+#tlabel { position:absolute; pointer-events:none; color:#fff; background:rgba(200,60,160,.85); padding:1px 6px; border-radius:4px; font-size:12px; transform:translate(-50%, -150%); }
+.plots { display:grid; grid-template-columns:2fr 1fr; gap:12px; margin-top:12px; }
+.plots canvas { width:100%; height:170px; display:block; }
+.ok { color:var(--ok); } .bad { color:var(--bad); }
+#stage.nogl #nogl { display:block; }
+#stage.nogl .bar, #stage.nogl #hud, #stage.nogl #tlabel { display:none; }
+p.hint { color:var(--mut); font-size:12px; margin:6px 2px 12px; }
+footer { padding:0 16px 16px; color:var(--mut); font-size:12px; }
+@media (max-width: 820px) {
+  main { grid-template-columns:1fr; padding:8px 16px; }
+  #side { order:2; } #view { order:1; }
+  #stage { height:58vh; }
+  #views { top:38px; right:auto; left:8px; }
+  .bar button { font-size:11px; padding:2px 5px; }
+  .plots { grid-template-columns:1fr; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>arm-reach</h1>
+  <p data-i18n="tagline">Reach, dexterity and singularity explorer for 6/7-DoF arms</p>
+  <button id="lang" data-act="lang">한국어</button>
+</header>
+<main>
+  <div id="side">
+    <section>
+      <h2 data-i18n="model">Arm model</h2>
+      <label><span data-i18n="preset">Preset</span>
+        <select id="preset">
+          <option value="0" data-i18n="industrial6">6-DoF spherical-wrist industrial arm (typical)</option>
+          <option value="1" data-i18n="cobot7">7-DoF redundant collaborative arm (typical)</option>
+          <option value="2" data-i18n="humanoid6">6-DoF humanoid arm, shoulder-elbow-wrist (typical)</option>
+        </select></label>
+      <label><span data-i18n="conv">DH convention</span>
+        <select id="conv"><option value="std" data-i18n="standard">standard</option><option value="mod" data-i18n="modified">modified</option></select></label>
+      <label>DoF <select id="dof"><option>6</option><option>7</option></select></label>
+      <div class="scroll"><table>
+        <thead><tr><th>#</th><th>a [m]</th><th>α [°]</th><th>d [m]</th><th>θ₀ [°]</th><th>min [°]</th><th>max [°]</th></tr></thead>
+        <tbody id="dh"></tbody>
+      </table></div>
+      <label><span data-i18n="tool">Tool offset (last frame) [m]</span>
+        <input id="tx" type="number" step="0.01"><input id="ty" type="number" step="0.01"><input id="tz" type="number" step="0.01"></label>
+    </section>
+    <section>
+      <h2 data-i18n="joints">Joint angles (click # to select)</h2>
+      <div id="qs"></div>
+    </section>
+    <section>
+      <h2 data-i18n="sampling">Workspace sampling</h2>
+      <label><span data-i18n="samples">Samples</span>
+        <select id="count"><option value="2000">2k</option><option value="5000" selected>5k</option><option value="10000">10k</option></select></label>
+      <label><span data-i18n="measure">Measure</span>
+        <select id="measure"><option value="3" data-i18n="m3">translational J_v (3×N)</option><option value="6" data-i18n="m6">full J (6×N)</option></select></label>
+      <label><span data-i18n="thresh">Near-singular below [% of max w]</span>
+        <input id="thresh" type="number" min="0" max="100" step="0.5" value="5"></label>
+      <div class="kv" id="stats"></div>
+    </section>
+    <section>
+      <h2 data-i18n="reach">Reach check</h2>
+      <label><span data-i18n="target">Target [m]</span>
+        <input id="gx" type="number" step="0.01"><input id="gy" type="number" step="0.01"><input id="gz" type="number" step="0.01"></label>
+      <div class="kv" id="near"></div>
+      <button data-act="load" data-i18n="load">Load joints into sliders</button>
+    </section>
+  </div>
+  <div id="view">
+    <div id="stage">
+      <canvas id="gl"></canvas>
+      <div id="nogl" data-i18n="nogl">WebGL2 is not available in this browser. Numbers and plots still work.</div>
+      <div id="tlabel" data-i18n="tlabel">target</div>
+      <div class="bar" id="toggles">
+        <button class="on" data-act="t0" data-i18n="cloud">point cloud</button>
+        <button class="on" data-act="t1" data-i18n="ellipsoid">ellipsoid</button>
+        <button class="on" data-act="t2" data-i18n="frames">frames</button>
+        <button data-act="t3" data-i18n="nearonly">near-singular only</button>
+      </div>
+      <div class="bar" id="views">
+        <button data-act="v0" data-i18n="persp">Perspective</button>
+        <button data-act="v1" data-i18n="top">Top</button>
+        <button data-act="v2" data-i18n="side">Side</button>
+        <button data-act="v3" data-i18n="front">Front</button>
+      </div>
+      <div class="bar" id="anim">
+        <button data-act="sweep" id="sweep" data-i18n="sweep">▶ sweep</button>
+        <button data-act="speed" id="speed">1×</button>
+      </div>
+      <div id="hud"></div>
+    </div>
+    <p class="hint" data-i18n="hint"></p>
+    <section>
+      <h2 data-i18n="pose">Current pose</h2>
+      <div class="kv" id="pose"></div>
+    </section>
+    <div class="plots">
+      <section><h2 data-i18n="hist">Manipulability histogram (marker = current pose)</h2><canvas id="hist"></canvas></section>
+      <section><h2 data-i18n="margins">Joint-limit margins [°]</h2><canvas id="marg"></canvas></section>
+    </div>
+  </div>
+</main>
+<footer data-i18n="foot">Educational estimates: rigid links, ideal revolute joints, sampled (not exact) workspace, no collisions. Validate before using on a real robot. MIT license.</footer>
+</body>
+</html>
